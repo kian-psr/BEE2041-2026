@@ -1,0 +1,229 @@
+from pathlib import Path
+import re
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+FILE_PATH = Path(
+    r"/Users/kianposer/Desktop/Exeter/Year 2/Term 2/Data Science/Group Presentation/bee2041/ukhousepriceindexmonthlypricestatistics.xlsx"
+)
+OUTPUT_DIR = Path("analysis_output")
+OUTPUT_DIR.mkdir(exist_ok=True)
+
+sns.set_theme(style="whitegrid")
+pd.set_option("display.width", 180)
+pd.set_option("display.max_columns", 30)
+
+
+def clean_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    cleaned = []
+    for col in df.columns:
+        col = "" if col is None else str(col)
+        col = re.sub(r"\[.*?\]", "", col)
+        col = re.sub(r"\s+", " ", col).strip()
+        cleaned.append(col)
+    df.columns = cleaned
+    return df
+
+
+def load_prices() -> pd.DataFrame:
+    df = pd.read_excel(FILE_PATH, sheet_name="2", header=2)
+    df = clean_columns(df).dropna(how="all")
+    df = df.rename(columns={"Time period": "Date"})
+    df["Date"] = pd.to_datetime(df["Date"], format="%b %Y", errors="coerce")
+    df = df.dropna(subset=["Date"]).sort_values("Date")
+    for col in df.columns:
+        if col != "Date":
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def load_local_authority_table(sheet_name: str, nation: str) -> pd.DataFrame:
+    df = pd.read_excel(FILE_PATH, sheet_name=sheet_name, header=2, usecols="A:D")
+    df = clean_columns(df)
+    df = df.rename(
+        columns={
+            "Average Price (£)": "Average Price",
+            "Annual percentage change": "Annual % Change",
+        }
+    )
+    df["Average Price"] = pd.to_numeric(df["Average Price"], errors="coerce")
+    df["Annual % Change"] = pd.to_numeric(df["Annual % Change"], errors="coerce")
+    df["Nation"] = nation
+    df = df.dropna(subset=["RegionName", "Average Price"])
+    return df
+
+
+def growth_from_first_to_last(series: pd.Series) -> float:
+    s = series.dropna()
+    if len(s) < 2:
+        return float("nan")
+    return (s.iloc[-1] / s.iloc[0] - 1) * 100
+
+
+def print_section(title: str) -> None:
+    print("\n" + "=" * 100)
+    print(title)
+    print("=" * 100)
+
+
+def main() -> None:
+    if not FILE_PATH.exists():
+        raise FileNotFoundError(f"File not found: {FILE_PATH}")
+
+    prices = load_prices()
+    index_df = prices.set_index("Date")
+
+    area_cols = [c for c in prices.columns if c not in ["Date", "United Kingdom", "Great Britain"]]
+    area_cols = [c for c in area_cols if prices[c].notna().sum() > 12]
+
+    monthly_change = index_df[["United Kingdom"] + area_cols].pct_change() * 100
+    annual_change = index_df[["United Kingdom"] + area_cols].pct_change(12) * 100
+
+    # Q1
+    print_section("Q1) How has the UK average house price changed over time?")
+    uk = prices[["Date", "United Kingdom"]].dropna()
+    start_date, end_date = uk["Date"].iloc[0], uk["Date"].iloc[-1]
+    start_price, end_price = uk["United Kingdom"].iloc[0], uk["United Kingdom"].iloc[-1]
+    total_growth = (end_price / start_price - 1) * 100
+    years = (end_date - start_date).days / 365.25
+    cagr = ((end_price / start_price) ** (1 / years) - 1) * 100
+    print(f"Start: {start_date:%b %Y} -> £{start_price:,.0f}")
+    print(f"End:   {end_date:%b %Y} -> £{end_price:,.0f}")
+    print(f"Total growth: {total_growth:.2f}%")
+    print(f"CAGR: {cagr:.2f}% per year")
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(uk["Date"], uk["United Kingdom"], linewidth=2)
+    plt.title("UK Average House Price Over Time")
+    plt.xlabel("Date")
+    plt.ylabel("Price (£)")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "q1_uk_price_trend.png", dpi=160)
+    plt.close()
+
+    # Q2
+    print_section("Q2) Which areas had the fastest and slowest long-run growth?")
+    long_run_growth = index_df[area_cols].apply(growth_from_first_to_last).dropna().sort_values(ascending=False)
+    print("Top 5 growth:")
+    print(long_run_growth.head(5).round(2).to_string())
+    print("\nBottom 5 growth:")
+    print(long_run_growth.tail(5).round(2).to_string())
+
+    plt.figure(figsize=(12, 6))
+    long_run_growth.head(10).sort_values().plot(kind="barh")
+    plt.title("Top 10 Areas by Long-Run Growth (%)")
+    plt.xlabel("Growth (%)")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "q2_long_run_growth_top10.png", dpi=160)
+    plt.close()
+
+    # Q3
+    print_section("Q3) Which areas are currently the most and least expensive?")
+    latest_row = prices.dropna(subset=area_cols, how="all").iloc[-1]
+    latest_date = latest_row["Date"]
+    latest_prices = latest_row[area_cols].dropna().sort_values()
+    print(f"Latest month in dataset: {latest_date:%b %Y}")
+    print("\nLeast expensive 5 areas:")
+    print(latest_prices.head(5).round(0).to_string())
+    print("\nMost expensive 5 areas:")
+    print(latest_prices.tail(5).round(0).to_string())
+
+    plt.figure(figsize=(12, 6))
+    latest_prices.tail(10).sort_values().plot(kind="barh")
+    plt.title(f"Top 10 Most Expensive Areas ({latest_date:%b %Y})")
+    plt.xlabel("Price (£)")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "q3_latest_most_expensive_top10.png", dpi=160)
+    plt.close()
+
+    # Q4
+    print_section("Q4) Which areas are the most volatile month to month?")
+    volatility = monthly_change[area_cols].std().dropna().sort_values(ascending=False)
+    print("Highest monthly volatility (std dev of monthly % change):")
+    print(volatility.head(10).round(3).to_string())
+
+    plt.figure(figsize=(12, 6))
+    volatility.head(10).sort_values().plot(kind="barh")
+    plt.title("Top 10 Most Volatile Areas (Monthly % Change Std Dev)")
+    plt.xlabel("Std Dev (% points)")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "q4_volatility_top10.png", dpi=160)
+    plt.close()
+
+    # Q5
+    print_section("Q5) Which areas have the strongest recent 12-month growth?")
+    latest_annual_date = annual_change.dropna(how="all").index.max()
+    recent_yoy = annual_change.loc[latest_annual_date, area_cols].dropna().sort_values(ascending=False)
+    print(f"Using annual change at: {latest_annual_date:%b %Y}")
+    print("\nTop 5 annual growth:")
+    print(recent_yoy.head(5).round(2).to_string())
+    print("\nBottom 5 annual growth:")
+    print(recent_yoy.tail(5).round(2).to_string())
+
+    plt.figure(figsize=(12, 6))
+    recent_yoy.head(10).sort_values().plot(kind="barh")
+    plt.title(f"Top 10 Areas by Annual Growth ({latest_annual_date:%b %Y})")
+    plt.xlabel("Annual growth (%)")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "q5_recent_annual_growth_top10.png", dpi=160)
+    plt.close()
+
+    # Q6
+    print_section("Q6) How has London's price premium over the UK average changed?")
+    london_premium = (index_df["London"] / index_df["United Kingdom"] - 1) * 100
+    london_premium = london_premium.dropna()
+    print(f"Premium at start ({london_premium.index[0]:%b %Y}): {london_premium.iloc[0]:.2f}%")
+    print(f"Premium at end   ({london_premium.index[-1]:%b %Y}): {london_premium.iloc[-1]:.2f}%")
+    print(f"Highest premium observed: {london_premium.max():.2f}%")
+    print(f"Lowest premium observed: {london_premium.min():.2f}%")
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(london_premium.index, london_premium.values, linewidth=2, color="tab:red")
+    plt.title("London Price Premium vs UK Average")
+    plt.xlabel("Date")
+    plt.ylabel("Premium (%)")
+    plt.axhline(0, color="black", linewidth=1)
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "q6_london_premium.png", dpi=160)
+    plt.close()
+
+    # Q7
+    print_section("Q7) Which local authorities are the most expensive and fastest growing right now?")
+    la_eng = load_local_authority_table("8", "England")
+    la_wal = load_local_authority_table("9", "Wales")
+    la_sco = load_local_authority_table("10", "Scotland")
+    la_ni = load_local_authority_table("11", "Northern Ireland")
+    la = pd.concat([la_eng, la_wal, la_sco, la_ni], ignore_index=True)
+
+    top_expensive = la.nlargest(10, "Average Price")[["RegionName", "Nation", "Average Price", "Annual % Change"]]
+    top_growth = la.nlargest(10, "Annual % Change")[["RegionName", "Nation", "Average Price", "Annual % Change"]]
+
+    print("Top 10 most expensive local authorities:")
+    print(top_expensive.to_string(index=False))
+    print("\nTop 10 fastest annual growth local authorities:")
+    print(top_growth.to_string(index=False))
+
+    plt.figure(figsize=(10, 6))
+    sns.scatterplot(data=la, x="Average Price", y="Annual % Change", hue="Nation", alpha=0.8)
+    plt.title("Local Authority Price Level vs Annual Growth")
+    plt.xlabel("Average Price (£)")
+    plt.ylabel("Annual % Change")
+    plt.tight_layout()
+    plt.savefig(OUTPUT_DIR / "q7_local_authority_scatter.png", dpi=160)
+    plt.close()
+
+    # Save tables
+    long_run_growth.rename("Growth %").round(2).to_csv(OUTPUT_DIR / "q2_long_run_growth_all_areas.csv")
+    latest_prices.rename("Latest Price").round(0).to_csv(OUTPUT_DIR / "q3_latest_prices_all_areas.csv")
+    volatility.rename("Volatility").round(4).to_csv(OUTPUT_DIR / "q4_volatility_all_areas.csv")
+    recent_yoy.rename("Annual Growth %").round(2).to_csv(OUTPUT_DIR / "q5_recent_annual_growth_all_areas.csv")
+    top_expensive.to_csv(OUTPUT_DIR / "q7_top10_expensive_local_authorities.csv", index=False)
+    top_growth.to_csv(OUTPUT_DIR / "q7_top10_growth_local_authorities.csv", index=False)
+
+    print("\nDone. Results saved to:", OUTPUT_DIR.resolve())
+
+
+if __name__ == "__main__":
+    main()
